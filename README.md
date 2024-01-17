@@ -2,6 +2,10 @@
 
 The study focuses on the key issue about how urban consumers adapt to climate hazards.
 
+> [!WARNING]
+> DO NOT upload any DATA or EXCEL FILES !!!
+> All possible datafiles should be blocked by `.gitignore`. 
+
 ### TODOs
 
 **Preparing**
