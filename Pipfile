@@ -1,0 +1,19 @@
+[[source]]
+url = "https://mirrors.aliyun.com/pypi/simple/"
+verify_ssl = true
+name = "pip_conf_index_global"
+
+[packages]
+# data processing
+openpyxl = "*"
+pandas = "*"
+matplotlib = "*"
+# statistics
+linearmodels = ">=5.4"
+# utility
+loguru = "*"
+tqdm = "*"
+[dev-packages]
+
+[requires]
+python_version = "3.9"

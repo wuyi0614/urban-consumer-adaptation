@@ -1,0 +1,9 @@
+{
+  "event1": {
+    "title": "",
+    "period": ["yyyymmdd", "yyyymmdd"],
+    "region": ["city1", "county1"],
+    "effect": "unanticipated"
+  },
+  "event2": {}
+}

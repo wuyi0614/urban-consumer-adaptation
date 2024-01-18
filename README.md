@@ -14,13 +14,12 @@ The study focuses on the key issue about how urban consumers adapt to climate ha
 
 **Data streaming**
 
-- [ ] develop the taxonomy of adaptative goods for consumers
+- [ ] develop the taxonomy of adaptative goods for consumers - create & update `taxonomy.json`
 
-- [ ] identify hazardous events and selected regions/periods
+- [ ] identify hazardous events and selected regions/periods - create & update `event.json`
 
 **Coding**
 
-- [ ] diff-in-diff stata dofile for preparing
+- [ ] diff-in-diff stata dofile for boosting (use `.py` scripts at experimental stage)
 
-- [ ] plotting script for trend proof in python
-
+- [ ] parallel trend validation with python

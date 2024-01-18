@@ -3,6 +3,7 @@
 *local*
 *.pdf
 __py*
+*.xlsx
 
 __pycache__/
 *.py[cod]
