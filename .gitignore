@@ -4,6 +4,7 @@
 *.pdf
 __py*
 *.xlsx
+.idea/
 
 __pycache__/
 *.py[cod]
