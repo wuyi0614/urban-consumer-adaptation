@@ -7,12 +7,15 @@ name = "pip_conf_index_global"
 # data processing
 openpyxl = "*"
 pandas = "*"
+numpy = "*"
 matplotlib = "*"
 # statistics
+statsmodels = "*"
 linearmodels = ">=5.4"
 # utility
 loguru = "*"
 tqdm = "*"
+
 [dev-packages]
 
 [requires]

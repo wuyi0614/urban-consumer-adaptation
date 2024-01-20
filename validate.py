@@ -21,10 +21,14 @@ import datetime
 
 from copy import deepcopy
 from pathlib import Path
+from dateutil.relativedelta import relativedelta
 
 import pandas as pd
+import numpy as np
+import statsmodels.formula.api as smf
+import linearmodels as lm
+import matplotlib.pyplot as plt
 
-from tqdm import tqdm
 from loguru import logger
 
 
@@ -105,8 +109,7 @@ def update_config(tax_file: Path = Path('taxonomy.json'),
 def processing(data: pd.DataFrame,
                taxonomy: dict,
                event: dict,
-               freq: str = 'd',
-               span: int = 30) -> dict:
+               parallel_span: int = 3) -> dict:
     """
     Data processing procedures where event-based data being labelled and goods being split.
     Note that, the structure of data should be like:
@@ -127,19 +130,12 @@ def processing(data: pd.DataFrame,
     :param data: the original dataframe on the REMOTE cloud
     :param taxonomy: a taxonomy json indexed by goods names and codes from alibaba data
     :param event: an event json indexed by events
-    :param freq: monthly or daily, default using `d`
-    :param span: the span of shock hitting, default 30 days
+    :param parallel_span: a span of parallel test, default as 3
     :return: a dict of `event`:`dataframe` with additional columns:
              1. treatment, 2. post, 3. orient
     """
     # NB. we assume `data` is the original dataset
     assert event, f'Event must be specified for validation'
-    if freq == 'd':
-        fmt = '%Y%m%d'
-        key_time = 'yyyymmdd'
-    else:  # ... following what is specified in the original dataset
-        fmt = '%Y%m'
-        key_time = 'yyyymm'
 
     # ensure data formats are consistent
     data['cate_id'] = data['cate_id'].astype(str)  # SHOULD NOT be integers and keep it in the form of dataframe
@@ -155,18 +151,23 @@ def processing(data: pd.DataFrame,
         sub['orient'] = orient  # ... basically, adaptation/ordinary
         combined = pd.concat([combined, sub], axis=0)  # axis=0, by row
 
-    # split data by events: key-value = event-name: event params
-    # TODO: here might make mistakes if the given data have biased date format!
-    comb_time = pd.to_datetime(combined[key_time], format=fmt)
-    combined[key_time] = comb_time
-    comb_city = combined['import_city_name'].astype(str)
-    combined['import_city_name'] = comb_city
-    span = datetime.timedelta(days=span)  # spans are default as days
-
+    # rebuild data based on events
     results = {}
     for e, param in event.items():
-        if param['freq'] != freq:  # skip events that not consistent with this function
-            continue
+        if param['freq'] == 'days':
+            fmt = '%Y%m%d'
+            key_time = 'yyyymmdd'
+        else:  # ... following what is specified in the original dataset
+            fmt = '%Y%m'
+            key_time = 'yyyymm'
+
+        # split data by events: key-value = event-name: event params
+        # TODO: here might make mistakes if the given data have biased date format!
+        comb_time = pd.to_datetime(combined[key_time], format=fmt)
+        combined[key_time] = comb_time
+        comb_city = combined['import_city_name'].astype(str)
+        combined['import_city_name'] = comb_city
+        span = relativedelta(**{param['freq']: param['span']})
 
         # step 1: specify time period, only
         start = datetime.datetime.strptime(param['period'][0], fmt)
@@ -188,7 +189,19 @@ def processing(data: pd.DataFrame,
         # add post labels
         res['post'] = 0
         res.loc[(res[key_time] >= start) & (res[key_time] <= end), 'post'] = 1
-        res.loc[res[key_time] > end, 'post'] = 2  # label the expensive period as 2
+        # ... add post[-1], post[-2] ..., post[1], post[2] ... for parallel tests
+        for i in range(1, parallel_span + 1):
+            back = start - relativedelta(**{param['freq']: i})  # ... use `i` instead of 1
+            ahead = start + relativedelta(**{param['freq']: i})
+
+            # ... add a key to parallel periods
+            key = f'pre{i}'  # backward
+            res[key] = 0
+            res.loc[res[key_time] == back, key] = 1
+            key = f'post{i}'
+            res[key] = 0
+            res.loc[res[key_time] == ahead, key] = 1
+
         # output the end-use data
         results[e] = res
 
@@ -252,28 +265,113 @@ def checking(df: pd.DataFrame,
     return first, second
 
 
-def did(data: pd.DataFrame, if_plot: bool = True) -> pd.DataFrame:
+def did(result: dict,
+        if_plot: bool = True,
+        parallel_span: int = 3,
+        multi_index: list = None,
+        save: Path = None) -> pd.DataFrame:
     """
     Difference-in-difference model for pre-validation with not-well-processed data
 
-    :param data:
-    :param if_plot:
+    :param result: a dict of event and its corresponding dataset
+    :param if_plot: True=plotting, False=stop plotting
+    :param parallel_span: a span of parallel test, default as 3
+    :param multi_index: two indexes for panel OLS
+    :param save: a Path-like object or None, default for `./checking-first-<timestamp>.csv`
     :return: a dataframe with regression results
     """
+    if multi_index is None:
+        multi_index = ['import_city_name', 'yyyymm']
 
-    # predicted summary in an Excel file
-    return
+    save = Path() if save is None else Path(save)
+
+    # NB. the following test should be executed event by event
+    for e, data in result.items():
+        # doing logarithm conversion before modelling
+        data['lngmv'] = data['gmv'].apply(lambda x: np.log(x + 1))
+        data['treatmentxpost'] = data['treatment'] * data['post']
+        # 1. baseline model spec: pooled OLS
+        m1 = smf.ols('lngmv ~ treatmentxpost', data=data).fit()
+        f = save / f'pooled-did-{e}-{get_timestamp()}.txt'
+        f.write_text(m1.summary().as_text(), encoding='utf8')
+
+        # NB. the default test covers the first and last 3 periods of shock and,
+        #     to modify parallel params, specify `parallel_span` in `processing()`.
+        # 2. parallel test using pooled OLS
+        back, ahead = [], []
+        for i in range(1, parallel_span + 1):
+            data[f'treatmentxpre{i}'] = data[f'pre{i}'] * data['treatment']
+            data[f'treatmentxpost{i}'] = data[f'post{i}'] * data['treatment']
+            back += [f'treatmentxpre{i}']
+            ahead += [f'treatmentxpost{i}']
+
+        back.reverse()  # from -1, -2, ... to ... -2, -1!
+        syntax = '+'.join(back) + ' + treatmentxpost + ' + '+'.join(ahead)
+        m2 = smf.ols(f'lngmv ~ {syntax}', data=data).fit()
+        f = save / f'pooled-parallel-{e}-{get_timestamp()}.txt'
+        f.write_text(m2.summary().as_text(), encoding='utf8')
+
+        # 1. baseline model spec: panel OLS with two-way fixed effect
+        # lm requires a MultiIndex for panel data
+        data = data.set_index(multi_index)
+        m1_tw = lm.PanelOLS(data['lngmv'], data['treatmentxpost'], entity_effects=True, time_effects=True)
+        fit = m1_tw.fit(cov_type='clustered', cluster_entity=True)
+        f = save / f'panel-did-{e}-{get_timestamp()}.txt'
+        f.write_text(fit.summary.as_text(), encoding='utf8')
+
+        # 2. parallel test using panel OLS
+        x = back + ['treatmentxpost'] + ahead
+        m2_tw = lm.PanelOLS(data['lngmv'], data[x], entity_effects=True, time_effects=True, check_rank=False)
+        fit2 = m2_tw.fit(cov_type='clustered', cluster_entity=True)
+        f = save / f'panel-parallel-{e}-{get_timestamp()}.txt'
+        f.write_text(fit2.summary.as_text(), encoding='utf8')
+
+        # plotting the parallel trend
+        if if_plot:
+            fig = plt.figure(figsize=(12, 12))
+            ax1 = fig.add_subplot(2, 1, 1)
+            ax2 = fig.add_subplot(2, 1, 2)
+            x_range = range(parallel_span * 2 + 1)  # if span=3, will have 7 points
+            # 1. pooled OLS
+            ax1.plot(x_range, m2.params[1:], linewidth=2, c='blue')
+            ax1.hlines(y=0, xmin=0, xmax=parallel_span * 2 + 1)
+            ax1.set_ylabel('Coef.', size=16)
+            ax1.set_title('Pooled OLS Parallel Test', size=16)
+            ax1.set_xticks(x_range, [])
+
+            # 2. panel OLS
+            ax2.plot(x_range, fit2.params, linewidth=2, c='purple')
+            ax2.hlines(y=0, xmin=0, xmax=parallel_span * 2)
+            ax2.set_xlabel('Treatment x Pre/Post', size=16)
+            ax2.set_ylabel('Coef.', size=16)
+            ax2.set_title('Panel OLS Parallel Test', size=16)
+            ticks = [t.replace('treatmentx', '') for t in x]
+            ax2.set_xticks(x_range, ticks, fontsize=14)
+            fig.savefig(str(save / f'validate-did-{get_timestamp()}.png'), dpi=200, format='png')
 
 
 if __name__ == '__main__':
+    # create directory
+    save = Path('results')
+    save.mkdir(parents=True, exist_ok=True)
+
+    # general param
+    parallel_span = 3
+
     # test 1: processing
     data = pd.read_excel('data/demo_data_modified.xlsx', engine='openpyxl')
     taxonomy = load_config(Path('taxonomy.json'))
     event = load_config(Path('event.json'))
-    r = processing(data, taxonomy, event, freq='m', span=30)
+    result = processing(data, taxonomy, event, parallel_span=parallel_span)
 
     # test 2: checking
     checklist = ['gmv']
-    f, s = checking(r['测试用'], taxonomy, checklist, save=Path())
+    f, s = checking(result['测试用'], taxonomy, checklist, save=save)
 
     # test 3: did validation
+    multi_index = ['import_city_name', 'yyyymm']
+    did(result,
+        if_plot=True,
+        parallel_span=parallel_span,
+        multi_index=multi_index,
+        save=save)
