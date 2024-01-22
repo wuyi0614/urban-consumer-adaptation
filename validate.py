@@ -2,19 +2,6 @@
 #
 # example: https://lost-stats.github.io/Model_Estimation/Research_Design/event_study.html
 #
-# Columns: (for counties, replace `city` by `county` in the following specs)
-# ç	年份-月份
-# export_city_id	出口城市行政区划代码
-# export_city_name	出口城市名称
-# import_city_id	进口城市行政区划代码
-# import_city_name	进口城市名称
-# gmv	成交金额
-# deal	成交订单量
-# splnum	商家数量
-# csrnum	消费者数量
-# itemnum	商品数量
-# cate_id	商品类目代码
-# cate_name	商品类目名称
 
 import json
 import datetime
@@ -27,6 +14,8 @@ import pandas as pd
 import numpy as np
 import statsmodels.formula.api as smf
 import linearmodels as lm
+
+import seaborn as sns
 import matplotlib.pyplot as plt
 
 from loguru import logger
@@ -148,7 +137,7 @@ def processing(data: pd.DataFrame,
         idx_of_data = data['cate_id'].isin(query_idx)  # index-like result
         # concat dataframes horizontally
         sub = data[idx_of_data].copy(deep=True)
-        sub['orient'] = orient  # ... basically, adaptation/ordinary
+        sub['orient'] = 1 if orient == 'adaptation' else 0  # ... basically, adaptation=1/ordinary=0
         combined = pd.concat([combined, sub], axis=0)  # axis=0, by row
 
     # rebuild data based on events
@@ -164,7 +153,9 @@ def processing(data: pd.DataFrame,
         # split data by events: key-value = event-name: event params
         # TODO: here might make mistakes if the given data have biased date format!
         comb_time = pd.to_datetime(combined[key_time], format=fmt)
-        combined[key_time] = comb_time
+        combined['date'] = comb_time
+        combined = combined.drop(columns=[key_time])  # unified the column name
+
         comb_city = combined['import_city_name'].astype(str)
         combined['import_city_name'] = comb_city
         span = relativedelta(**{param['freq']: param['span']})
@@ -188,7 +179,7 @@ def processing(data: pd.DataFrame,
         res.loc[res['import_city_name'].isin(treated), 'treatment'] = 1
         # add post labels
         res['post'] = 0
-        res.loc[(res[key_time] >= start) & (res[key_time] <= end), 'post'] = 1
+        res.loc[(res['date'] >= start) & (res['date'] <= end), 'post'] = 1
         # ... add post[-1], post[-2] ..., post[1], post[2] ... for parallel tests
         for i in range(1, parallel_span + 1):
             back = start - relativedelta(**{param['freq']: i})  # ... use `i` instead of 1
@@ -197,10 +188,10 @@ def processing(data: pd.DataFrame,
             # ... add a key to parallel periods
             key = f'pre{i}'  # backward
             res[key] = 0
-            res.loc[res[key_time] == back, key] = 1
+            res.loc[res['date'] == back, key] = 1
             key = f'post{i}'
             res[key] = 0
-            res.loc[res[key_time] == ahead, key] = 1
+            res.loc[res['date'] == ahead, key] = 1
 
         # output the end-use data
         results[e] = res
@@ -263,6 +254,67 @@ def checking(df: pd.DataFrame,
     first.to_csv(save / f'checking-first-{get_timestamp()}.csv', encoding='utf8')
     second.to_csv(save / f'checking-second-{get_timestamp()}.csv', encoding='utf8')
     return first, second
+
+
+def trend(result: dict,
+          event: dict,
+          checking_keys: list = None,
+          save: Path = None) -> pd.DataFrame:
+    """
+    Summarise trending results of either adaptation/ordinary goods
+
+    :param result: a dict of event and its corresponding dataset
+    :param event: an event json indexed by events
+    :param checking_keys: keys of checking interest
+    :param save: a Path-like object or None, default for `./checking-first-<timestamp>.csv`
+    :return: a dataframe contains all trending results
+    """
+    output = pd.DataFrame()
+    for e, df in result.items():
+        o = pd.DataFrame()
+        for c in checking_keys:
+            # summarise data
+            uni = df[['date']].drop_duplicates().reset_index(drop=True)
+            for k in ['orient', 'treatment']:
+                # ... merging with true samples
+                s = df.loc[df[k] == 1, ['date', c]].groupby('date').mean().reset_index()
+                s.columns = ['date'] + [f'{i}|{k}=1' for i in checking_keys]
+                uni = uni.merge(s, on='date', how='left')
+                # ... merging with false samples
+                s = df.loc[df[k] == 0, ['date', c]].groupby('date').mean().reset_index()
+                s.columns = ['date'] + [f'{c}|{k}=0']
+                uni = uni.merge(s, on='date', how='left')
+
+            # complete merging and fill NaNs with zero
+            uni = uni.fillna(0)
+            o = pd.concat([o, uni], axis=1)  # append by cols
+            melt = uni.melt(id_vars=['date'], value_vars=uni.columns.values[1:])
+            # load event params
+            evt = event[e]
+            fmt = '%Y%m%d' if evt['freq'] == 'days' else '%Y%m'
+            ticks = uni['date'].apply(lambda x: datetime.datetime.strftime(x, fmt))
+            ticks = ticks.values.tolist()
+            # find out the max/min values
+            # plot the trending
+            fig = plt.figure(figsize=(8, 6))
+            sns.lineplot(data=uni)
+            # draw vert lines for the shock
+            start, end = evt['period']
+            plt.vlines(x=ticks.index(start), ymin=0, ymax=max(melt['value']), colors='grey', linestyles='--')
+            plt.vlines(x=ticks.index(end), ymin=0, ymax=max(melt['value']), colors='grey', linestyles='--')
+            plt.fill_betweenx(y=(0, max(melt['value'])), x1=ticks.index(start), x2=ticks.index(end),
+                              facecolor='grey', alpha=0.15)
+            # change ticks
+            plt.xticks(range(0, len(uni)), labels=uni['date'].astype(str), rotation=45)
+            plt.tight_layout()
+            plt.margins(0.01)
+            fig.savefig(save / f'trend-{e}-{c}-{get_timestamp()}.png', dpi=200, format='png')
+
+        # append by columns
+        output = pd.concat([output, o], axis=0)
+    # finished
+    output = output.to_csv(save / f'trend-{get_timestamp()}.csv', encoding='utf8')
+    return output
 
 
 def did(result: dict,
@@ -375,3 +427,6 @@ if __name__ == '__main__':
         parallel_span=parallel_span,
         multi_index=multi_index,
         save=save)
+
+    # test 4: plot trending
+    trending = trend(result, event, checklist, save)
