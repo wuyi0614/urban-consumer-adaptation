@@ -10,16 +10,20 @@ The study focuses on the key issue about how urban consumers adapt to climate ha
 
 **Preparing**
 
-- [ ] drafting research proposal using demo data
+- [x] drafting research proposal using demo data
 
 **Data streaming**
 
-- [ ] develop the taxonomy of adaptative goods for consumers - create & update `taxonomy.json`
+- [x] develop the taxonomy of adaptative goods for consumers - create & update `taxonomy.json`
 
-- [ ] identify hazardous events and selected regions/periods - create & update `event.json`
+- [x] identify hazardous events and selected regions/periods - create & update `event.json`
 
 **Coding**
 
-- [ ] diff-in-diff stata dofile for boosting (use `.py` scripts at experimental stage)
+- [x] diff-in-diff stata do-file for boosting (use `.py` scripts at experimental stage)
 
-- [ ] parallel trend validation with python
+- [x] parallel trend validation with python
+
+- [ ] SQL-based data extraction script (*pending for aliyun*)
+
+- [ ] rewrite `validate-no-depend.py` without any dependencies

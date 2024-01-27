@@ -1,5 +1,6 @@
 [[source]]
-url = "https://mirrors.aliyun.com/pypi/simple/"
+#url = "https://mirrors.aliyun.com/pypi/simple/"
+url = "https://pypi.org/simple"
 verify_ssl = true
 name = "pip_conf_index_global"
 
@@ -9,15 +10,12 @@ openpyxl = "*"
 pandas = "*"
 numpy = "*"
 matplotlib = "*"
-seaborn = "*"
 # statistics
 statsmodels = "*"
-linearmodels = ">=5.4"
 # utility
-loguru = "*"
 tqdm = "*"
 
 [dev-packages]
 
 [requires]
-python_version = "3.9"
+python_version = "3.8"

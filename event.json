@@ -1,5 +1,7 @@
 {
-  "测试用": {
+  "key_time": "pt_name",
+  "key_goods": "ind_name",
+  "测试气候灾害": {
     "period": [
       "201601",
       "201603"
