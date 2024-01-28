@@ -2,10 +2,11 @@
 # This version contains no external dependencies in case they are not available on ali cloud
 #
 
+import os
 import json
+import shutil
 import datetime
 
-from copy import deepcopy
 from pathlib import Path
 from dateutil.relativedelta import relativedelta
 
@@ -39,6 +40,7 @@ def load_config(f: Path) -> dict:
 #       we have to do the loading recursively and split them in chunks,
 #       and save intermediary datafiles sorted by `City`.
 def read_data(f: Path,
+              event: dict,
               encoding: str = 'utf8',
               tempfolder: Path = Path('temp'),
               chunk: int = 10e5) -> pd.DataFrame:
@@ -46,7 +48,9 @@ def read_data(f: Path,
     Read data from text files by lines.
 
     :param f: filepath of saved datafile, default for a csv file
+    :param event: an event json indexed by events
     :param encoding: default for `utf8`
+    :param tempfolder: temporary folder for data storage
     :param chunk: in case the file is too big, use chuck to recursively load
     :return: a standard pandas dataframe
     """
@@ -57,12 +61,21 @@ def read_data(f: Path,
     tempfolder = Path(tempfolder)
     tempfolder.mkdir(exist_ok=True, parents=True)  # create the temp folder if it's not existed
 
+    # specify cities
+    cities = []
+    for _, param in event.items():
+        cities += param['treated'] + param['untreated']
+
     def iterate_write(directory: Path,
                       df: pd.DataFrame,
+                      city_list: list = [],
                       city_key: str = 'csr_area',
                       encoding: str = encoding):
         """An iterative writer splitting big dataframe into datafiles by cities"""
         for city, g in df.groupby(city_key):
+            if len(city_list) != 0 or city not in city_list:
+                continue
+
             print(f'Read city: {city} with {len(g)} lines of data')
             file = directory / f'{city}.txt'
             existed = file.exists()
@@ -88,53 +101,15 @@ def read_data(f: Path,
 
         idx += 1  # the chunk index iteratively grows
         count += len(d)
-        iterate_write(tempfolder, d, encoding=encoding)
+        iterate_write(tempfolder, d, city_list=cities, encoding=encoding)
 
     print(f'Completed reading {count} lines of data!')
-
-
-def update_config(tax_file: Path = Path('taxonomy.json'),
-                  event_file: Path = Path('event.json'),
-                  goods_list_file: Path = Path('data') / 'goods_list.xlsx') -> None:
-    """
-    Update configured taxonomy and event json files by goods list data sheet.
-
-    :param tax_file: file path for taxonomy config
-    :param event_file: file path for even config
-    :param goods_list_file: file path for goods list Excel file which might be updated some time
-    :return: None
-    """
-    goods = pd.read_excel(goods_list_file, engine='openpyxl', dtype=str)
-    tax = load_config(tax_file)  # mainly update its second category: index
-
-    # event = load_config(event_file)  # TODO: not yet need updating
-
-    # match with goods names
-    def match(aspect: str):
-        idx = {}
-        for k, v in tax[aspect].items():
-            # use cate_level2_id as the unique index
-            sub = goods[goods.cate_level1_name.isin(v)]
-            sub.index = sub['cate_level2_id']
-            sub = sub.drop(columns=['cate_level2_id'])
-            # develop the index
-            for i, it in sub.iterrows():
-                idx[i] = it.values.tolist()
-
-        # update index
-        tax[aspect]['index'] = deepcopy(idx)
-        return tax
-
-    # update indexes
-    tax = match('adaptation')
-    tax = match('ordinary')
-    # saving output
-    tax_file.write_text(json.dumps(tax), encoding='utf8')
 
 
 def processing(event: dict,
                ord_goods: list,
                ada_goods: list,
+               tempfolder: Path,
                parallel_span: int = 3) -> None:
     """
     Data processing procedures where event-based data being labelled and goods being split.
@@ -143,6 +118,7 @@ def processing(event: dict,
     :param event: an event json indexed by events
     :param ord_goods: a list of ordinary goods
     :param ada_goods: a list of adaptative goods
+    :param tempfolder: inherited tempfolder
     :param parallel_span: a span of parallel test, default as 3
     :return: a dict of `event`:`dataframe` with additional columns:
              1. treatment, 2. post, 3. orient
@@ -165,10 +141,10 @@ def processing(event: dict,
         # create dataframes for each event
         r = pd.DataFrame()
         for c in cities:
-            file = Path('temp') / f'{c}.txt'
-            assert file.exists(), f'CityNotFound: {c}'
+            file = tempfolder / f'{c}.txt'
+            assert os.path.exists(str(file)), f'CityNotFound: {c}'
             # read data from textfiles
-            d = pd.read_csv(file, delimiter=',', header=[0])
+            d = pd.read_csv(str(file), delimiter=',', header=[0])
             d[key_time] = pd.to_datetime(d[key_time], format=fmt)
 
             # step 1: specify time period, only
@@ -210,17 +186,20 @@ def processing(event: dict,
 
         # output event-based data
         r[key_time] = r[key_time].apply(lambda x: x.strftime(fmt))
-        r.to_csv(f'temp/{e}.txt', sep=',', index=False, encoding='utf8')
+        savefile = tempfolder / f'{e}.txt'
+        r.to_csv(str(savefile), sep=',', index=False, encoding='utf8')
         print(f'Finish rendering event: {e}!')
 
 
 def trend(event: dict,
+          tempfolder: Path,
           checking_keys: list,
           save: Path = None) -> pd.DataFrame:
     """
     Summarise trending results of either adaptation/ordinary goods
 
     :param event: an event json indexed by events
+    :param tempfolder: inherited tempfolder
     :param checking_keys: keys of checking interest
     :param save: a Path-like object or None, default for `./checking-first-<timestamp>.csv`
     :return: a dataframe contains all trending results
@@ -242,7 +221,8 @@ def trend(event: dict,
             continue
 
         # load event-based dataframe
-        df = pd.read_csv(f'temp/{e}.txt', header=[0], delimiter=',')
+        f = tempfolder / f'{e}.txt'
+        df = pd.read_csv(str(f), header=[0], delimiter=',')
         df[[key_time]] = df[[key_time]].astype(str)
         o = pd.DataFrame()
         for idx, c in enumerate(checking_keys):
@@ -305,6 +285,7 @@ def trend(event: dict,
 
 
 def did(event: dict,
+        tempfolder: Path,
         if_plot: bool = True,
         parallel_span: int = 3,
         save: Path = None) -> pd.DataFrame:
@@ -323,7 +304,8 @@ def did(event: dict,
         if isinstance(param, str):  # skip those non-configured params
             continue
 
-        data = pd.read_csv(f'temp/{e}.txt', delimiter=',', header=[0])
+        f = tempfolder / f'{e}.txt'
+        data = pd.read_csv(str(f), delimiter=',', header=[0])
         # doing logarithm conversion before modelling
         data['lngmv'] = data['gmv'].apply(lambda x: np.log(x + 1))
         data['treatmentxpost'] = data['treatment'] * data['post']
@@ -370,43 +352,63 @@ def main(datafile: Path,
          save: Path,
          checklist: list,
          chunk: int = 10e5,
+         redo: bool = False,
          parallel_span: int = 3,
          if_plot: bool = True):
-    read_data(datafile, chunk=chunk)
+
+    tempfolder = eventfile.parent / 'temp'  # ../temp/ should be in the same folder with datafile
+    if redo and os.path.exists(str(tempfolder)):  # DO NOT replicate data-reading again if redo=False
+        shutil.rmtree(str(tempfolder))  # delete them all every time we run it over again
+        read_data(datafile, tempfolder=tempfolder, chunk=chunk)
+    elif redo or not os.path.exists(str(tempfolder)):  # redo = True or no temp/ folder
+        read_data(datafile, tempfolder=tempfolder, chunk=chunk)
+
     event = load_config(eventfile)
-    processing(event, ord, ada)
+    processing(event, ord, ada, tempfolder)
+
+    save = Path(save)
     save.mkdir(parents=True, exist_ok=True)
-    trend(event, checking_keys=checklist, save=save)
-    did(event, if_plot=if_plot, parallel_span=parallel_span, save=save)
+
+    trend(event, tempfolder, checking_keys=checklist, save=save)
+    did(event, tempfolder, if_plot=if_plot, parallel_span=parallel_span, save=save)
 
 
 if __name__ == '__main__':
-    # test 1: load data by lines and split them into files
-    testfile = Path('data') / 'demo_data_test.txt'
-    read_data(testfile, chunk=100)
+    from pathlib import PureWindowsPath
 
-    # test 2: processing
-    # ['生活用品及服务', '食品烟酒', '医疗保健', '居住', '其他用品和服务',
-    #  '交通和通信', '衣着', '教育文化和娱乐']
-    event = load_config(Path('event.json'))
-    ord = ['生活用品及服务', '食品烟酒', '衣着']
-    ada = ['医疗保健', '居住']
-    processing(event, ord, ada)
-
-    # test 3: trending
-    save = Path('results')
-    save.mkdir(parents=True, exist_ok=True)
-    o = trend(event, checking_keys=['amount', 'ord_cnt'], save=save)
-
-    # test 4: diff-in-diff with Pooled OLS
-    checklist = ['amount']
-    did(event,
-        if_plot=True,
-        parallel_span=3,
-        save=save)
+    # # NB. The following codes are valid only for local tests.
+    # # test 1: load data by lines and split them into files
+    # testfile = Path('data') / 'demo_data_test.txt'
+    # read_data(testfile, chunk=100)
+    #
+    # # test 2: processing
+    # # ['生活用品及服务', '食品烟酒', '医疗保健', '居住', '其他用品和服务',
+    # #  '交通和通信', '衣着', '教育文化和娱乐']
+    # event = load_config(Path('event.json'))
+    # ord = ['生活用品及服务', '食品烟酒', '衣着']
+    # ada = ['医疗保健', '居住']
+    # processing(event, ord, ada)
+    #
+    # # test 3: trending
+    # save = Path('results')
+    # save.mkdir(parents=True, exist_ok=True)
+    # o = trend(event, checking_keys=['amount', 'ord_cnt'], save=save)
+    #
+    # # test 4: diff-in-diff with Pooled OLS
+    # checklist = ['amount']
+    # did(event,
+    #     if_plot=True,
+    #     parallel_span=3,
+    #     save=save)
 
     # production operation
     # configuration: city_level.txt, 20110101-20191231
-    file = Path('D:/air_pollution') / 'input' / 'city_level' / 'city_category.txt'  # the target file
-    efile = Path('event-dev.json')
-    main(file, efile, ord, ada, save, chunk=10e5)
+    root = PureWindowsPath('C:/Users/wb-ljw894653.DIPPER/PycharmProjects/UrbanConsumerAdaptation')
+    efile = root / 'event-dev.json'
+    save = root / 'results'
+
+    datafile = PureWindowsPath('D:/air_pollution/input/city_level/city_category.txt')  # the target file
+    ord = ['生活用品及服务', '食品烟酒', '衣着']
+    ada = ['医疗保健', '居住']
+    checklist = ['amount', 'ord_cnt']
+    main(datafile, efile, ord, ada, save, checklist=checklist, chunk=100000)
