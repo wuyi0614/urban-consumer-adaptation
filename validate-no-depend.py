@@ -6,6 +6,7 @@ import os
 import json
 import shutil
 import datetime
+import logging
 
 from pathlib import Path
 from dateutil.relativedelta import relativedelta
@@ -14,6 +15,10 @@ import pandas as pd
 import numpy as np
 import statsmodels.formula.api as smf
 import matplotlib.pyplot as plt
+
+# general config of logging
+logging.basicConfig(format='%(asctime)s-[line:%(lineno)d]: %(message)s',
+                    level=logging.INFO)
 
 
 # TODO: utility functions should be put in the utils.py script
@@ -36,6 +41,35 @@ def load_config(f: Path) -> dict:
     return conf
 
 
+def iterate_write(directory: Path,
+                  df: pd.DataFrame,
+                  city_list: list = [],
+                  city_key: str = 'csr_area',
+                  encoding: str = 'utf8'):
+    """An iterative writer splitting big dataframe into datafiles by cities"""
+    ci = []
+    for city, g in df.groupby(city_key):
+        if city not in city_list:
+            continue
+
+        ci += [city]  # record how many cities have been written
+        file = directory / f'{city}.txt'
+        existed = os.path.exists(file)
+
+        # use append mode to write data in lines
+        with file.open('a', encoding=encoding) as f:
+            if not existed:  # the first line of columns
+                col = g.columns.to_numpy().reshape((1, g.shape[1]))
+                np.savetxt(f, col, delimiter=',', fmt='%s')
+
+            # DO NOT duplicate columns if the file is already existed
+            np.savetxt(f, g.values, delimiter=',', fmt='%s')
+
+        logging.info(f'Write {len(g)} lines into {city}!')
+    # completed
+    return ci
+
+
 # TODO: in case the memory cannot load up the whole dataset,
 #       we have to do the loading recursively and split them in chunks,
 #       and save intermediary datafiles sorted by `City`.
@@ -43,7 +77,7 @@ def read_data(f: Path,
               event: dict,
               encoding: str = 'utf8',
               tempfolder: Path = Path('temp'),
-              chunk: int = 10e5) -> pd.DataFrame:
+              chunk: int = 10e5) -> None:
     """
     Read data from text files by lines.
 
@@ -57,43 +91,27 @@ def read_data(f: Path,
     f = Path(f)  # convert string into Path object
     assert f.exists(), f'FileNotFound: {str(f)}'
 
-    # write iteratively into a textfile by city
-    tempfolder = Path(tempfolder)
-    tempfolder.mkdir(exist_ok=True, parents=True)  # create the temp folder if it's not existed
-
     # specify cities
     cities = []
     for _, param in event.items():
+        if isinstance(param, str):  # skip those non-configured params
+            continue
+
         cities += param['treated'] + param['untreated']
+    # complete city loading
+    logging.info(f'Found {len(cities)} cities in the config! They are: {cities}')
 
-    def iterate_write(directory: Path,
-                      df: pd.DataFrame,
-                      city_list: list = [],
-                      city_key: str = 'csr_area',
-                      encoding: str = encoding):
-        """An iterative writer splitting big dataframe into datafiles by cities"""
-        for city, g in df.groupby(city_key):
-            if len(city_list) != 0 or city not in city_list:
-                continue
-
-            print(f'Read city: {city} with {len(g)} lines of data')
-            file = directory / f'{city}.txt'
-            existed = file.exists()
-            # use append mode to write data in lines
-            with file.open('a', encoding=encoding) as f:
-                if not existed:
-                    col = g.columns.to_numpy().reshape((1, g.shape[1]))
-                    np.savetxt(f, col, delimiter=',', fmt='%s')
-
-                # DO NOT duplicate columns if the file is already existed
-                np.savetxt(f, g.values, delimiter=',', fmt='%s')
-
-            print(f'Finish city: {city} at {str(file)}')
+    # before running the iterative writing
+    for c in cities:
+        fi = tempfolder / f'{c}.txt'
+        if os.path.isfile(str(fi)):
+            print(f'Found duplicate and deleted: {fi.name}')
+            os.unlink(str(fi))
 
     idx = 0  # since you do not know how many lines in total, use while
     count = 0  # count how many lines in total
+    found_cities = []
     while True:
-        print(f'Load data: {idx} chunks finished')
         # NB. when skipsrows starts with `1`, it keeps the header!
         d = pd.read_csv(f, skiprows=range(1, idx * chunk + 1), header=[0], nrows=chunk, delimiter=',')
         if d.empty:  # no more data
@@ -101,9 +119,11 @@ def read_data(f: Path,
 
         idx += 1  # the chunk index iteratively grows
         count += len(d)
-        iterate_write(tempfolder, d, city_list=cities, encoding=encoding)
+        ci = iterate_write(tempfolder, d, city_list=cities, encoding=encoding)
+        found_cities += ci
 
-    print(f'Completed reading {count} lines of data!')
+    msg = f"Expected {len(cities)} cities and found {len(set(found_cities))} cities!"
+    logging.info(f'Completed reading {count} lines of data. {msg}')
 
 
 def processing(event: dict,
@@ -133,7 +153,7 @@ def processing(event: dict,
         if isinstance(param, str):  # skip those non-configured params
             continue
 
-        print(f'Render event: {e}')
+        logging.info(f'Render event: {e}')
         # NB. DO NOT change the format of dates
         fmt = '%Y%m%d' if param['freq'] == 'days' else '%Y%m'
         span = relativedelta(**{param['freq']: param['span']})
@@ -142,7 +162,8 @@ def processing(event: dict,
         r = pd.DataFrame()
         for c in cities:
             file = tempfolder / f'{c}.txt'
-            assert os.path.exists(str(file)), f'CityNotFound: {c}'
+            assert os.path.exists(str(file)), f'CityNotFound: at {str(file)}'
+
             # read data from textfiles
             d = pd.read_csv(str(file), delimiter=',', header=[0])
             d[key_time] = pd.to_datetime(d[key_time], format=fmt)
@@ -161,9 +182,9 @@ def processing(event: dict,
             d = d[ord_mask | ada_mask]
 
             # step 3: specify labels
-            d['adaptation'] = 1  # NB. masked dataframe does not contain any other goods
-            d.loc[ord_mask, 'adaptation'] = 0
-            d['treatment'] = 1 if c in param['treated'] else 0
+            d['adapt'] = 1  # NB. masked dataframe does not contain any other goods
+            d.loc[ord_mask, 'adapt'] = 0
+            d['treat'] = 1 if c in param['treated'] else 0
             d['post'] = 0  # create shock period
             d.loc[(d[key_time] >= start) & (d[key_time] <= end), 'post'] = 1
 
@@ -188,7 +209,7 @@ def processing(event: dict,
         r[key_time] = r[key_time].apply(lambda x: x.strftime(fmt))
         savefile = tempfolder / f'{e}.txt'
         r.to_csv(str(savefile), sep=',', index=False, encoding='utf8')
-        print(f'Finish rendering event: {e}!')
+        logging.info(f'Finish rendering event: {e}!')
 
 
 def trend(event: dict,
@@ -223,53 +244,103 @@ def trend(event: dict,
         # load event-based dataframe
         f = tempfolder / f'{e}.txt'
         df = pd.read_csv(str(f), header=[0], delimiter=',')
+        df = df.sort_values(key_time)
         df[[key_time]] = df[[key_time]].astype(str)
         o = pd.DataFrame()
         for idx, c in enumerate(checking_keys):
             # summarise data
             uni = df[[key_time]].drop_duplicates().reset_index(drop=True)
-            for k in ['adaptation', 'treatment']:
+            # check adaptation: 0/1 first
+            for j in ['adapt', 'treat']:
                 # ... merging with true samples
-                s = df.loc[df[k] == 1, [key_time, c]].groupby(key_time).mean().reset_index()
-                s.columns = [key_time] + [f'{c}|{k}=1']
+                s = df.loc[df[j] == 1, [key_time, c]].groupby(key_time).mean().reset_index()
+                s.columns = [key_time] + [f'{c}|{j}=1']
                 uni = uni.merge(s, on=key_time, how='left')
                 # ... merging with false samples
-                s = df.loc[df[k] == 0, [key_time, c]].groupby(key_time).mean().reset_index()
-                s.columns = [key_time] + [f'{c}|{k}=0']
+                s = df.loc[df[j] == 0, [key_time, c]].groupby(key_time).mean().reset_index()
+                s.columns = [key_time] + [f'{c}|{j}=0']
+                uni = uni.merge(s, on=key_time, how='left')
+
+            # check treatment + adaptation: 0/1 first (4 groups)
+            for i in range(0, 2):  # 0, 1
+                # merging with the untreated
+                mask = df['treat'] == i
+                s = df.loc[(df['adapt'] == 1) & mask, [key_time, c]].groupby(key_time).mean().reset_index()
+                s.columns = [key_time] + [f'{c}|adapt=1|treat={i}']
+                uni = uni.merge(s, on=key_time, how='left')
+                s = df.loc[(df['adapt'] == 0) & mask, [key_time, c]].groupby(key_time).mean().reset_index()
+                s.columns = [key_time] + [f'{c}|adapt=0|treat={i}']
                 uni = uni.merge(s, on=key_time, how='left')
 
             # complete merging and fill NaNs with zero
             uni = uni.fillna(0)
-            melt = uni.melt(id_vars=[key_time], value_vars=uni.columns.values[1:])
             # load event params
             evt = event[e]
             ticks = uni[key_time].tolist()
             # find out the max/min values
-            # plot the trending
-            fig = plt.figure(figsize=(8, 6))
+            # use a set of colors
             cvalues = list(colors.values()) * 10  # in case we have many checking keys
-            for i, c in enumerate(uni.columns.values[1:]):
-                x_range = range(len(uni))
-                plt.plot(x_range, uni[c],
+            fig = plt.figure(figsize=(12, 12))
+            ax1 = plt.subplot(2, 1, 1)
+            ax2 = plt.subplot(2, 1, 2)
+            # create two parallel plots
+            x_range = range(len(uni))
+            start, end = evt['period']
+
+            # draw overall adaptation: 0/1 lineplots
+            for i, col in enumerate(uni.columns.values[1:5]):
+                ax1.plot(x_range, uni[col],
                          color=cvalues[i],
                          marker='o',
+                         linestyle='dashed',
                          markersize=6,
-                         label=c)
-
-            # draw vert lines for the shock
-            start, end = evt['period']
-            plt.vlines(x=ticks.index(start), ymin=0, ymax=max(melt['value']), colors='grey', linestyles='--')
-            plt.vlines(x=ticks.index(end), ymin=0, ymax=max(melt['value']), colors='grey', linestyles='--')
-            plt.fill_betweenx(y=(0, max(melt['value'])),
+                         label=col)
+            # find the min/max values
+            arr = uni.iloc[:, 1:5].to_numpy()
+            ax1.vlines(x=ticks.index(start), ymin=0, ymax=arr.max(), colors='grey', linestyles='--')
+            ax1.vlines(x=ticks.index(end), ymin=0, ymax=arr.max(), colors='grey', linestyles='--')
+            ax1.fill_betweenx(y=(0, arr.max()),
                               x1=ticks.index(start),
                               x2=ticks.index(end),
                               facecolor='grey', alpha=0.15)
             # change ticks
-            plt.xticks(range(0, len(uni)), labels=uni[key_time].astype(str), rotation=45)
-            plt.legend(fontsize=9)
+            ax1.set_xticks(range(0, len(uni)), labels=[])
+            ax1.legend(fontsize=9)
+            plt.tight_layout()
+            plt.margins(0.01)
+            # draw subgroup-based adaptation: 0/1 lineplots
+            # NB. add pre-shock ATT to the adaptation=0&treatment=0 group
+            pre_mask = uni[key_time] < start
+            att = (uni.loc[pre_mask, f'{c}|adapt=0|treat=0'].mean() -
+                   uni.loc[pre_mask, f'{c}|adapt=0|treat=1'].mean())
+            post_mask = uni[key_time] > end
+            uni[f'{c}|adapt=0|treat=0|att+'] = uni[f'{c}|adapt=0|treat=0']
+            uni.loc[post_mask, f'{c}|adapt=0|treat=0|att+'] = uni.loc[post_mask, f'{c}|adapt=0|treat=0|att+'] + att
+
+            for i, col in enumerate(uni.columns.values[5:]):
+                x_range = range(len(uni))
+                ax2.plot(x_range, uni[col],
+                         color=cvalues[i],
+                         marker='x',
+                         markersize=6,
+                         label=col)
+
+            # draw vert lines for the shock
+            arr = uni.iloc[:, 5:].to_numpy()
+            ax2.vlines(x=ticks.index(start), ymin=0, ymax=arr.max(), colors='grey', linestyles='--')
+            ax2.vlines(x=ticks.index(end), ymin=0, ymax=arr.max(), colors='grey', linestyles='--')
+            ax2.fill_betweenx(y=(0, arr.max()),
+                              x1=ticks.index(start),
+                              x2=ticks.index(end),
+                              facecolor='grey', alpha=0.15)
+            # change ticks
+            ax2.set_xticks(range(0, len(uni)), labels=uni[key_time].astype(str), rotation=45)
+            ax2.legend(fontsize=9)
+            # general specs
             plt.tight_layout()
             plt.margins(0.01)
             fig.savefig(save / f'trend-{e}-{c}-{get_timestamp()}.png', dpi=200, format='png')
+
             # append uni tables
             if idx > 0:
                 uni = uni.iloc[:, 1:]
@@ -280,7 +351,7 @@ def trend(event: dict,
         output = pd.concat([output, o], axis=0)
 
     # finished
-    output = output.to_csv(save / f'trend-{get_timestamp()}.csv', encoding='utf8')
+    output.to_csv(save / f'trend-{get_timestamp()}.csv', encoding='utf8')
     return output
 
 
@@ -308,9 +379,9 @@ def did(event: dict,
         data = pd.read_csv(str(f), delimiter=',', header=[0])
         # doing logarithm conversion before modelling
         data['lngmv'] = data['gmv'].apply(lambda x: np.log(x + 1))
-        data['treatmentxpost'] = data['treatment'] * data['post']
+        data['treatxpost'] = data['treat'] * data['post']
         # 1. baseline model spec: pooled OLS
-        m1 = smf.ols('lngmv ~ treatmentxpost', data=data).fit()
+        m1 = smf.ols('lngmv ~ treatxpost', data=data).fit()
         f = save / f'pooled-did-{e}-{get_timestamp()}.txt'
         f.write_text(m1.summary().as_text(), encoding='utf8')
 
@@ -319,13 +390,13 @@ def did(event: dict,
         # 2. parallel test using pooled OLS
         back, ahead = [], []
         for i in range(1, parallel_span + 1):
-            data[f'treatmentxpre{i}'] = data[f'pre{i}'] * data['treatment']
-            data[f'treatmentxpost{i}'] = data[f'post{i}'] * data['treatment']
-            back += [f'treatmentxpre{i}']
-            ahead += [f'treatmentxpost{i}']
+            data[f'treatxpre{i}'] = data[f'pre{i}'] * data['treat']
+            data[f'treatxpost{i}'] = data[f'post{i}'] * data['treat']
+            back += [f'treatxpre{i}']
+            ahead += [f'treatxpost{i}']
 
         back.reverse()  # from -1, -2, ... to ... -2, -1!
-        syntax = '+'.join(back) + ' + treatmentxpost + ' + '+'.join(ahead)
+        syntax = '+'.join(back) + ' + treatxpost + ' + '+'.join(ahead)
         m2 = smf.ols(f'lngmv ~ {syntax}', data=data).fit()
         f = save / f'pooled-parallel-{e}-{get_timestamp()}.txt'
         f.write_text(m2.summary().as_text(), encoding='utf8')
@@ -340,35 +411,34 @@ def did(event: dict,
             plt.ylabel('Coef.', size=16)
             plt.title('Pooled OLS Parallel Test', size=16)
             plt.xticks(x_range,
-                       syntax.replace('treatmentx', '').replace(' ', '').split('+'),
+                       syntax.replace('treatx', '').replace(' ', '').split('+'),
                        rotation=45)
             fig.savefig(str(save / f'validate-did-{get_timestamp()}.png'), dpi=200, format='png')
 
 
-def main(datafile: Path,
-         eventfile: Path,
+def main(datafile,
+         eventfile,
          ord: list,
          ada: list,
-         save: Path,
+         save,
          checklist: list,
          chunk: int = 10e5,
          redo: bool = False,
          parallel_span: int = 3,
          if_plot: bool = True):
 
+    event = load_config(eventfile)
     tempfolder = eventfile.parent / 'temp'  # ../temp/ should be in the same folder with datafile
+
     if redo and os.path.exists(str(tempfolder)):  # DO NOT replicate data-reading again if redo=False
         shutil.rmtree(str(tempfolder))  # delete them all every time we run it over again
-        read_data(datafile, tempfolder=tempfolder, chunk=chunk)
-    elif redo or not os.path.exists(str(tempfolder)):  # redo = True or no temp/ folder
-        read_data(datafile, tempfolder=tempfolder, chunk=chunk)
 
-    event = load_config(eventfile)
+    os.mkdir(tempfolder)  # create a folder if it's not existed
+    # write city-specific data into files
+    read_data(datafile, event, tempfolder=tempfolder, chunk=chunk)
+    # processing data and save them in tempfolder
     processing(event, ord, ada, tempfolder)
-
-    save = Path(save)
-    save.mkdir(parents=True, exist_ok=True)
-
+    # output results
     trend(event, tempfolder, checking_keys=checklist, save=save)
     did(event, tempfolder, if_plot=if_plot, parallel_span=parallel_span, save=save)
 
@@ -376,27 +446,33 @@ def main(datafile: Path,
 if __name__ == '__main__':
     from pathlib import PureWindowsPath
 
-    # # NB. The following codes are valid only for local tests.
-    # # test 1: load data by lines and split them into files
+    # NB. The following codes are valid only for local tests.
+    # test 1: load data by lines and split them into files
+    # event = load_config(Path('event.json'))
+    # temppath = Path('temp')
+    # if os.path.exists(str(temppath)):  # DO NOT replicate data-reading again if redo=False
+    #     shutil.rmtree(str(temppath))  # delete them all every time we run it over again
+    #
+    # os.mkdir(temppath)
     # testfile = Path('data') / 'demo_data_test.txt'
-    # read_data(testfile, chunk=100)
+    # read_data(testfile, event, tempfolder=temppath, chunk=100)
     #
     # # test 2: processing
     # # ['生活用品及服务', '食品烟酒', '医疗保健', '居住', '其他用品和服务',
     # #  '交通和通信', '衣着', '教育文化和娱乐']
-    # event = load_config(Path('event.json'))
     # ord = ['生活用品及服务', '食品烟酒', '衣着']
     # ada = ['医疗保健', '居住']
-    # processing(event, ord, ada)
+    # processing(event, ord, ada, tempfolder=temppath)
     #
     # # test 3: trending
     # save = Path('results')
     # save.mkdir(parents=True, exist_ok=True)
-    # o = trend(event, checking_keys=['amount', 'ord_cnt'], save=save)
+    # o = trend(event, temppath, checking_keys=['amount', 'ord_cnt'], save=save)
     #
     # # test 4: diff-in-diff with Pooled OLS
     # checklist = ['amount']
     # did(event,
+    #     temppath,
     #     if_plot=True,
     #     parallel_span=3,
     #     save=save)
@@ -406,9 +482,12 @@ if __name__ == '__main__':
     root = PureWindowsPath('C:/Users/wb-ljw894653.DIPPER/PycharmProjects/UrbanConsumerAdaptation')
     efile = root / 'event-dev.json'
     save = root / 'results'
+    if os.path.exists(str(save)):  # DO NOT replicate data-reading again if redo=False
+        shutil.rmtree(str(save))  # delete them all every time we run it over again
 
+    os.mkdir(str(save))  # refresh results/ folder
     datafile = PureWindowsPath('D:/air_pollution/input/city_level/city_category.txt')  # the target file
     ord = ['生活用品及服务', '食品烟酒', '衣着']
     ada = ['医疗保健', '居住']
     checklist = ['amount', 'ord_cnt']
-    main(datafile, efile, ord, ada, save, checklist=checklist, chunk=100000)
+    main(datafile, efile, ord, ada, save, checklist=checklist, chunk=100000, redo=True)
