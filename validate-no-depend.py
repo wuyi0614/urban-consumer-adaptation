@@ -297,7 +297,8 @@ def trend(event: dict,
             x_range = range(len(uni))
 
             # draw overall adaptation: 0/1 lineplots
-            for i, col in enumerate(uni.columns[uni.columns.str.contains('adapt=0')]):
+            col_mask = uni.columns.str.contains('adapt=0')
+            for i, col in enumerate(uni.columns[col_mask]):
                 ax1.plot(x_range, uni[col],
                          color=cvalues[i],
                          marker='o',
@@ -305,7 +306,7 @@ def trend(event: dict,
                          markersize=6,
                          label=col)
             # find the min/max values
-            arr = uni.iloc[:, 1:5].to_numpy()
+            arr = uni[uni.columns[col_mask]].to_numpy()
             ax1.vlines(x=ticks.index(start), ymin=0, ymax=arr.max(), colors='grey', linestyles='--')
             ax1.vlines(x=ticks.index(end), ymin=0, ymax=arr.max(), colors='grey', linestyles='--')
             ax1.fill_betweenx(y=(0, arr.max()),
@@ -313,13 +314,15 @@ def trend(event: dict,
                               x2=ticks.index(end),
                               facecolor='grey', alpha=0.15)
             # change ticks
+            ax1.set_ylim(arr.min(), arr.max())
             ax1.set_xticks(range(0, len(uni)), labels=[])
             ax1.legend(fontsize=9)
+            ax1.margins(0.01)
             plt.tight_layout()
-            plt.margins(0.01)
             # draw subgroup-based adaptation: 0/1 lineplots
             # NB. add pre-shock ATT to the adaptation=0&treatment=0 group
-            for i, col in enumerate(uni.columns[uni.columns.str.contains('adapt=1')]):
+            col_mask = uni.columns.str.contains('adapt=1')
+            for i, col in enumerate(uni.columns[col_mask]):
                 x_range = range(len(uni))
                 ax2.plot(x_range, uni[col],
                          color=cvalues[i],
@@ -328,7 +331,7 @@ def trend(event: dict,
                          label=col)
 
             # draw vert lines for the shock
-            arr = uni.iloc[:, 5:].to_numpy()
+            arr = uni[uni.columns[col_mask]].to_numpy()
             ax2.vlines(x=ticks.index(start), ymin=0, ymax=arr.max(), colors='grey', linestyles='--')
             ax2.vlines(x=ticks.index(end), ymin=0, ymax=arr.max(), colors='grey', linestyles='--')
             ax2.fill_betweenx(y=(0, arr.max()),
@@ -336,11 +339,12 @@ def trend(event: dict,
                               x2=ticks.index(end),
                               facecolor='grey', alpha=0.15)
             # change ticks
+            ax2.set_ylim(arr.min(), arr.max())
             ax2.set_xticks(range(0, len(uni)), labels=uni[key_time].astype(str), rotation=45)
             ax2.legend(fontsize=9)
             # general specs
+            ax2.margins(0.01)
             plt.tight_layout()
-            plt.margins(0.01)
             fig.savefig(save / f'trend-{e}-{c}-{get_timestamp()}.png', dpi=200, format='png')
 
             # append uni tables
